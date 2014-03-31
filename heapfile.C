@@ -62,9 +62,8 @@ const Status createHeapFile(const string fileName)
                 }
             }
 	    }
+        status = db.closeFile(file);
         return status;
-		
-		
     }
     return (FILEEXISTS);
 }
@@ -81,7 +80,7 @@ HeapFile::HeapFile(const string & fileName, Status& returnStatus)
     Status 	status;
     Page*	pagePtr;
 
-    cout << "opening file " << fileName << endl;
+    cout << "opening file: " << fileName << endl;
 
     // open the file and read in the header page and the first data page
     if ((status = db.openFile(fileName, filePtr)) == OK)
@@ -107,7 +106,7 @@ HeapFile::HeapFile(const string & fileName, Status& returnStatus)
 		            curDirtyFlag = false;
 		            curRec = NULLRID;
 	            }		        
-		    } // seems to be working...
+		    }
 		}
     }
     else
@@ -279,41 +278,38 @@ const Status HeapFileScan::scanNext(RID& outRid)
     status = filePtr->getFirstPage(nextPageNo);
     if (status == OK)
     {
-        status = bufMgr->readPage(filePtr, nextPageNo, curPage);
-        while (status == OK)
+        while ((status = bufMgr->readPage(filePtr, nextPageNo, curPage)) == OK)
         {
             status = curPage->firstRecord(tmpRid);
-            while (status == OK)
+            if (status == OK)
             {
-                status = curPage->getRecord(tmpRid, rec);
-                if (status == OK)
+                // scan through records
+                curRec = tmpRid;
+                while ((status = getRecord(rec)) == OK)
                 {
+                    // if record matches save it to outRid 
                     if (matchRec(rec))
                     {
                         curRec = outRid = tmpRid;
+                        status = bufMgr->unPinPage(filePtr, nextPageNo, false);
+                        return status;
+                    }
+                    status = curPage->nextRecord(tmpRid, nextRid);
+                    if (status == OK)
+                    {
+                        curRec = tmpRid = nextRid;
                     }
                 }
-                status = curPage->nextRecord(tmpRid, nextRid);
-                if (status == OK)
-                {
-                    tmpRid = nextRid;
-                    status = curPage->getRecord(tmpRid, rec);
-                }
             }
-            bufMgr->unPinPage(filePtr, nextPageNo, curDirtyFlag);
+            status = bufMgr->unPinPage(filePtr, nextPageNo, false);
+            if (status != OK)
+            {
+                return status;
+            }
             nextPageNo++;
-            status = bufMgr->readPage(filePtr, nextPageNo, curPage);
 	    }
     }
     return status;
-	
-	
-	// done, see if it works...
-	
-	
-	
-	
-	
 }
 
 
@@ -437,19 +433,21 @@ const Status InsertFileScan::insertRecord(const Record & rec, RID& outRid)
         return INVALIDRECLEN;
     }
     
+    // read the last page in the pool
     status = bufMgr->readPage(filePtr, headerPage->lastPage, curPage);
     if (status == OK)
     {
+        // update current page number and insert record onto the page
         curPageNo = headerPage->lastPage;
         status = curPage->insertRecord(rec, rid);
         if (status == OK)
         {
+            // write the page to the file then update the current record and unpin the page
             status = filePtr->writePage(curPageNo, curPage);
             if (status == OK)
             {
-                //cout << "inserted record on page: " << curPageNo << endl;
                 curRec = outRid = rid;
-                unpinstatus = bufMgr->unPinPage(filePtr, curPageNo, true);
+                unpinstatus = bufMgr->unPinPage(filePtr, curPageNo, curDirtyFlag);
                 if (unpinstatus != OK)
                 {
                     return unpinstatus;
@@ -458,13 +456,17 @@ const Status InsertFileScan::insertRecord(const Record & rec, RID& outRid)
         }
         else
         {
-            // page is full, allocate a new page and insert the record
+            // page is full, allocate new page and insert record to it
+            unpinstatus = bufMgr->unPinPage(filePtr, curPageNo, curDirtyFlag);
+            if (unpinstatus != OK)
+            {
+                return unpinstatus;
+            }
+            // allocate a new page
             status = bufMgr->allocPage(filePtr, newPageNo, newPage);
             if (status == OK)
             {
                 headerPage->pageCnt++;
-                //cout << "curPageNo: " << curPageNo << endl;
-                //cout << "insertRecord:allocated page: " << newPageNo << endl;
                 // initialize new page!!
                 newPage->init(newPageNo);
                 
@@ -476,29 +478,22 @@ const Status InsertFileScan::insertRecord(const Record & rec, RID& outRid)
                     status = filePtr->writePage(newPageNo, newPage);
                     if (status == OK)
                     {
-                        //cout << "inserted record on page: " << newPageNo << endl;
                         // update curPage and curPageNo
                         curPage = newPage;
                         headerPage->lastPage = curPageNo = newPageNo;
                         curRec = outRid = rid;
+                        // unpin the new page
+                        unpinstatus = bufMgr->unPinPage(filePtr, newPageNo, true);
+                        if (unpinstatus != OK)
+                        {
+                            return unpinstatus;
+                        }
                     }
                 }
             }
         }
     }
-    
-    
     return status;
-    
-    // not working....
-    
-    
-    
-    
-    
-    
-    
-    
 }
 
 
